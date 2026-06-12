@@ -25,6 +25,7 @@ def generate_launch_description():
                 executable="target_geo_node",
                 name="target_geo_node",
                 output="screen",
+                prefix="/home/klmn/cudac/comm/.venv/bin/python3",
                 parameters=[
                     {
                         "mavlink_connection": LaunchConfiguration("mavlink_connection"),
