@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>target_geo_comm</name>
+  <version>0.0.1</version>
+  <description>MAVLink and vision target geolocation bridge.</description>
+  <maintainer email="user@example.com">user</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>launch</depend>
+  <depend>launch_ros</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
+
