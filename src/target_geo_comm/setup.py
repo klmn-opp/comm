@@ -9,7 +9,7 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),
         (f"share/{package_name}", ["package.xml"]),
-        (f"share/{package_name}/launch", ["launch/target_geo.launch.py"]),
+        (f"share/{package_name}/launch", ["launch/target_geo.launch.py", "launch/target_guidance.launch.py"]),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -20,6 +20,7 @@ setup(
     entry_points={
         "console_scripts": [
             "target_geo_node = target_geo_comm.target_geo_node:main",
+            "target_guidance_node = target_geo_comm.target_guidance_node:main",
         ],
     },
 )
