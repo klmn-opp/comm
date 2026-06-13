@@ -65,7 +65,11 @@ class TargetGeoNode(Node):
         self.declare_parameter("target_altitude_mode", "pnp")
         self.declare_parameter("target_altitude_offset_m", 0.0)
         self.declare_parameter("use_sim_target_geo", False)
+        self.declare_parameter("sim_target_mode", "fixed_distance")
         self.declare_parameter("sim_target_distance_m", 80.0)
+        self.declare_parameter("sim_target_distance_end_m", 0.0)
+        self.declare_parameter("sim_target_closing_speed_mps", 0.0)
+        self.declare_parameter("sim_target_reset_delay_s", 3.0)
         self.declare_parameter("sim_min_direction_distance_m", 3.0)
         self.declare_parameter("sim_target_bearing_offset_deg", 0.0)
         self.declare_parameter("publish_raw_target_geo", True)
@@ -85,10 +89,17 @@ class TargetGeoNode(Node):
         self.target_altitude_mode = self.get_parameter("target_altitude_mode").get_parameter_value().string_value
         self.target_altitude_offset_m = float(self.get_parameter("target_altitude_offset_m").value)
         self.use_sim_target_geo = bool(self.get_parameter("use_sim_target_geo").value)
+        self.sim_target_mode = self.get_parameter("sim_target_mode").get_parameter_value().string_value
         self.sim_target_distance_m = float(self.get_parameter("sim_target_distance_m").value)
+        self.sim_target_distance_end_m = float(self.get_parameter("sim_target_distance_end_m").value)
+        self.sim_target_closing_speed_mps = float(self.get_parameter("sim_target_closing_speed_mps").value)
+        self.sim_target_reset_delay_s = float(self.get_parameter("sim_target_reset_delay_s").value)
         self.sim_min_direction_distance_m = float(self.get_parameter("sim_min_direction_distance_m").value)
         self.sim_target_bearing_offset_deg = float(self.get_parameter("sim_target_bearing_offset_deg").value)
         self.publish_raw_target_geo = bool(self.get_parameter("publish_raw_target_geo").value)
+        self.sim_start_time: Optional[float] = None
+        self.sim_end_reached_time: Optional[float] = None
+        self.warned_unsupported_sim_mode = False
 
         self.r_body_camera = camera_to_body_matrix(
             float(self.get_parameter("camera_roll_deg").value),
@@ -329,6 +340,13 @@ class TargetGeoNode(Node):
             out_north_m=f"{float(output_p_ned[0]):.3f}",
             out_east_m=f"{float(output_p_ned[1]):.3f}",
             sim=int(self.use_sim_target_geo),
+            sim_mode=self.sim_target_mode,
+            sim_distance_m=f"{self.sim_target_distance_m:.3f}",
+            sim_active_distance_m=f"{math.hypot(float(output_p_ned[0]), float(output_p_ned[1])):.3f}",
+            sim_distance_end_m=f"{self.sim_target_distance_end_m:.3f}",
+            sim_closing_speed_mps=f"{self.sim_target_closing_speed_mps:.3f}",
+            sim_reset_delay_s=f"{self.sim_target_reset_delay_s:.3f}",
+            sim_bearing_offset_deg=f"{self.sim_target_bearing_offset_deg:.3f}",
             lat=f"{lat:.7f}",
             lon=f"{lon:.7f}",
         )
@@ -339,7 +357,7 @@ class TargetGeoNode(Node):
         self.status_pub.publish(msg)
 
     def simulate_target_offset(self, state: AircraftState, p_ned: np.ndarray) -> np.ndarray:
-        target_distance = max(0.0, self.sim_target_distance_m)
+        target_distance = self.resolve_sim_target_distance(state)
         current_distance = math.hypot(float(p_ned[0]), float(p_ned[1]))
         min_direction_distance = max(0.0, self.sim_min_direction_distance_m)
 
@@ -363,6 +381,48 @@ class TargetGeoNode(Node):
         p_ned[0] = north_unit * target_distance
         p_ned[1] = east_unit * target_distance
         return p_ned
+
+    def resolve_sim_target_distance(self, state: AircraftState) -> float:
+        start_distance = max(0.0, self.sim_target_distance_m)
+        end_distance = max(0.0, self.sim_target_distance_end_m)
+
+        if self.sim_target_mode == "fixed_distance":
+            self.sim_start_time = None
+            self.sim_end_reached_time = None
+            return start_distance
+
+        if self.sim_target_mode == "closing_distance":
+            now = time.time()
+            if self.sim_start_time is None:
+                self.sim_start_time = now
+                self.sim_end_reached_time = None
+
+            closing_speed = self.sim_target_closing_speed_mps
+            if closing_speed <= 0.0:
+                closing_speed = max(0.0, state.groundspeed_mps)
+
+            elapsed = max(0.0, now - self.sim_start_time)
+            distance = start_distance - closing_speed * elapsed
+            if distance <= end_distance:
+                if self.sim_end_reached_time is None:
+                    self.sim_end_reached_time = now
+                    return end_distance
+
+                reset_delay = max(0.0, self.sim_target_reset_delay_s)
+                if now - self.sim_end_reached_time >= reset_delay:
+                    self.sim_start_time = now
+                    self.sim_end_reached_time = None
+                    return start_distance
+
+                return end_distance
+
+            self.sim_end_reached_time = None
+            return distance
+
+        if not self.warned_unsupported_sim_mode:
+            self.get_logger().warning(f"unsupported sim_target_mode={self.sim_target_mode}, using fixed_distance")
+            self.warned_unsupported_sim_mode = True
+        return start_distance
 
     def resolve_target_altitude(self, state: AircraftState, p_ned: np.ndarray) -> float:
         if self.target_altitude_mode == "ground_msl_offset":

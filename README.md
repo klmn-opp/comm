@@ -79,7 +79,13 @@ ros2 launch target_geo_comm target_geo.launch.py \
 ```
 
 - `use_sim_target_geo`: 是否发布拉远后的 `/target_geo`，默认 `false`
+- `sim_target_mode`: 模拟距离模式，默认 `fixed_distance`
+  - `fixed_distance`: 始终使用 `sim_target_distance_m`
+  - `closing_distance`: 从 `sim_target_distance_m` 按闭合速度逐渐减小到 `sim_target_distance_end_m`
 - `sim_target_distance_m`: 拉远后的水平距离，单位米，默认 `80.0`
+- `sim_target_distance_end_m`: `closing_distance` 的最小距离，单位米，默认 `0.0`
+- `sim_target_closing_speed_mps`: `closing_distance` 的闭合速度。设为 `0.0` 时使用飞控地速，默认 `0.0`
+- `sim_target_reset_delay_s`: 到达最小距离后等待多久重置到初始距离，默认 `3.0`
 - `sim_min_direction_distance_m`: 原始目标水平距离小于该值时，使用飞机航向作为拉远方向，默认 `3.0`
 - `sim_target_bearing_offset_deg`: 在选定方向上额外旋转的方位角，正值向右偏，负值向左偏，默认 `0.0`
 - `publish_raw_target_geo`: 是否发布 `/target_geo_raw`，默认 `true`
@@ -87,6 +93,20 @@ ros2 launch target_geo_comm target_geo.launch.py \
 如果只增大 `sim_target_distance_m`，目标仍会沿原方向拉远；原方向左右分量很小时，左右偏移也会很小。需要明显左右偏移时设置 `sim_target_bearing_offset_deg`，例如 200 米距离配 15 度偏角，横向偏移约 52 米。
 
 启用后，`/target_geo_raw` 保留真实视觉换算结果，`/target_geo` 输出拉远后的模拟航点，下游航点发送节点无需修改。
+
+如果手持相机和图片目标的真实距离基本不变，但需要模拟飞机逐渐接近目标，可以使用：
+
+```bash
+ros2 launch target_geo_comm target_geo.launch.py \
+  use_sim_target_geo:=true \
+  sim_target_mode:=closing_distance \
+  sim_target_distance_m:=200.0 \
+  sim_target_distance_end_m:=20.0 \
+  sim_target_reset_delay_s:=3.0 \
+  sim_target_closing_speed_mps:=15.0
+```
+
+此时视觉结果仍提供目标方向，模拟参数提供虚拟距离；`use_sim_target_geo:=false` 时不会执行这些模拟算法。
 
 机体系约定：
 
