@@ -11,7 +11,7 @@ import rclpy
 from geometry_msgs.msg import PointStamped, PoseStamped
 from rclpy.node import Node
 from sensor_msgs.msg import NavSatFix, NavSatStatus
-from std_msgs.msg import Float64MultiArray
+from std_msgs.msg import Float64MultiArray, String
 from rclpy.time import Time
 
 from target_geo_comm.geo_math import ned_offset_to_geodetic
@@ -64,6 +64,11 @@ class TargetGeoNode(Node):
         self.declare_parameter("target_max_age_s", 0.5)
         self.declare_parameter("target_altitude_mode", "pnp")
         self.declare_parameter("target_altitude_offset_m", 0.0)
+        self.declare_parameter("use_sim_target_geo", False)
+        self.declare_parameter("sim_target_distance_m", 80.0)
+        self.declare_parameter("sim_min_direction_distance_m", 3.0)
+        self.declare_parameter("sim_target_bearing_offset_deg", 0.0)
+        self.declare_parameter("publish_raw_target_geo", True)
 
         self.declare_parameter("camera_roll_deg", 0.0)
         self.declare_parameter("camera_pitch_deg", 90.0)
@@ -79,6 +84,11 @@ class TargetGeoNode(Node):
         self.target_max_age_s = float(self.get_parameter("target_max_age_s").value)
         self.target_altitude_mode = self.get_parameter("target_altitude_mode").get_parameter_value().string_value
         self.target_altitude_offset_m = float(self.get_parameter("target_altitude_offset_m").value)
+        self.use_sim_target_geo = bool(self.get_parameter("use_sim_target_geo").value)
+        self.sim_target_distance_m = float(self.get_parameter("sim_target_distance_m").value)
+        self.sim_min_direction_distance_m = float(self.get_parameter("sim_min_direction_distance_m").value)
+        self.sim_target_bearing_offset_deg = float(self.get_parameter("sim_target_bearing_offset_deg").value)
+        self.publish_raw_target_geo = bool(self.get_parameter("publish_raw_target_geo").value)
 
         self.r_body_camera = camera_to_body_matrix(
             float(self.get_parameter("camera_roll_deg").value),
@@ -103,7 +113,9 @@ class TargetGeoNode(Node):
         self.target_sub = self.create_subscription(PoseStamped, target_pose_topic, self.target_pose_callback, 10)
         self.aircraft_state_pub = self.create_publisher(Float64MultiArray, "/aircraft_state", 10)
         self.target_local_pub = self.create_publisher(PointStamped, "/target_local_ned", 10)
+        self.target_geo_raw_pub = self.create_publisher(NavSatFix, "/target_geo_raw", 10)
         self.target_geo_pub = self.create_publisher(NavSatFix, "/target_geo", 10)
+        self.status_pub = self.create_publisher(String, "/target_geo_status", 10)
 
         self.state_timer = self.create_timer(0.1, self.publish_aircraft_state)
         self.mav_thread.start()
@@ -178,6 +190,8 @@ class TargetGeoNode(Node):
                         continue
                     self.handle_mavlink_msg(msg)
             except Exception as exc:
+                if self.stop_event.is_set():
+                    break
                 self.get_logger().warning(f"MAVLink loop error: {exc}; reconnecting in 2s")
                 time.sleep(2.0)
 
@@ -236,6 +250,7 @@ class TargetGeoNode(Node):
             age = (now.nanoseconds - Time.from_msg(msg.header.stamp).nanoseconds) / 1e9
             if age > self.target_max_age_s:
                 self.get_logger().debug(f"skip stale target pose age={age:.3f}s")
+                self.publish_status(stage="stale_target_pose", target_age_s=f"{age:.3f}")
                 return
 
         with self.state_lock:
@@ -243,6 +258,13 @@ class TargetGeoNode(Node):
 
         if not state.is_ready(self.state_max_age_s):
             self.get_logger().debug("skip target pose because aircraft state is not ready")
+            wall_now = time.time()
+            self.publish_status(
+                stage="state_not_ready",
+                position_age_s=f"{wall_now - state.last_position_time:.3f}",
+                attitude_age_s=f"{wall_now - state.last_attitude_time:.3f}",
+                speed_age_s=f"{wall_now - state.last_speed_time:.3f}",
+            )
             return
 
         p_camera = np.array(
@@ -254,7 +276,7 @@ class TargetGeoNode(Node):
         p_ned = r_ned_body @ p_body
 
         target_alt = self.resolve_target_altitude(state, p_ned)
-        lat, lon, alt = ned_offset_to_geodetic(
+        raw_lat, raw_lon, raw_alt = ned_offset_to_geodetic(
             state.lat_deg,
             state.lon_deg,
             state.alt_msl_m,
@@ -262,14 +284,34 @@ class TargetGeoNode(Node):
             float(p_ned[1]),
             state.alt_msl_m - target_alt,
         )
+        output_p_ned = self.simulate_target_offset(state, p_ned.copy()) if self.use_sim_target_geo else p_ned
+        lat, lon, alt = ned_offset_to_geodetic(
+            state.lat_deg,
+            state.lon_deg,
+            state.alt_msl_m,
+            float(output_p_ned[0]),
+            float(output_p_ned[1]),
+            state.alt_msl_m - target_alt,
+        )
 
         local_msg = PointStamped()
         local_msg.header.stamp = self.get_clock().now().to_msg()
         local_msg.header.frame_id = "aircraft_ned"
-        local_msg.point.x = float(p_ned[0])
-        local_msg.point.y = float(p_ned[1])
-        local_msg.point.z = float(p_ned[2])
+        local_msg.point.x = float(output_p_ned[0])
+        local_msg.point.y = float(output_p_ned[1])
+        local_msg.point.z = float(output_p_ned[2])
         self.target_local_pub.publish(local_msg)
+
+        if self.publish_raw_target_geo:
+            raw_geo_msg = NavSatFix()
+            raw_geo_msg.header = local_msg.header
+            raw_geo_msg.header.frame_id = "earth"
+            raw_geo_msg.status.status = NavSatStatus.STATUS_FIX
+            raw_geo_msg.status.service = NavSatStatus.SERVICE_GPS
+            raw_geo_msg.latitude = raw_lat
+            raw_geo_msg.longitude = raw_lon
+            raw_geo_msg.altitude = raw_alt
+            self.target_geo_raw_pub.publish(raw_geo_msg)
 
         geo_msg = NavSatFix()
         geo_msg.header = local_msg.header
@@ -280,6 +322,47 @@ class TargetGeoNode(Node):
         geo_msg.longitude = lon
         geo_msg.altitude = alt
         self.target_geo_pub.publish(geo_msg)
+        self.publish_status(
+            stage="published",
+            raw_north_m=f"{float(p_ned[0]):.3f}",
+            raw_east_m=f"{float(p_ned[1]):.3f}",
+            out_north_m=f"{float(output_p_ned[0]):.3f}",
+            out_east_m=f"{float(output_p_ned[1]):.3f}",
+            sim=int(self.use_sim_target_geo),
+            lat=f"{lat:.7f}",
+            lon=f"{lon:.7f}",
+        )
+
+    def publish_status(self, **fields) -> None:
+        msg = String()
+        msg.data = " ".join(f"{key}={value}" for key, value in fields.items())
+        self.status_pub.publish(msg)
+
+    def simulate_target_offset(self, state: AircraftState, p_ned: np.ndarray) -> np.ndarray:
+        target_distance = max(0.0, self.sim_target_distance_m)
+        current_distance = math.hypot(float(p_ned[0]), float(p_ned[1]))
+        min_direction_distance = max(0.0, self.sim_min_direction_distance_m)
+
+        if current_distance >= min_direction_distance and current_distance > 1e-6:
+            north_unit = float(p_ned[0]) / current_distance
+            east_unit = float(p_ned[1]) / current_distance
+        else:
+            heading_rad = math.radians(state.heading_deg) if math.isfinite(state.heading_deg) else state.yaw_rad
+            north_unit = math.cos(heading_rad)
+            east_unit = math.sin(heading_rad)
+
+        bearing_offset_rad = math.radians(self.sim_target_bearing_offset_deg)
+        if abs(bearing_offset_rad) > 1e-9:
+            cos_offset = math.cos(bearing_offset_rad)
+            sin_offset = math.sin(bearing_offset_rad)
+            north_unit, east_unit = (
+                north_unit * cos_offset - east_unit * sin_offset,
+                north_unit * sin_offset + east_unit * cos_offset,
+            )
+
+        p_ned[0] = north_unit * target_distance
+        p_ned[1] = east_unit * target_distance
+        return p_ned
 
     def resolve_target_altitude(self, state: AircraftState, p_ned: np.ndarray) -> float:
         if self.target_altitude_mode == "ground_msl_offset":
@@ -298,4 +381,5 @@ def main() -> None:
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()

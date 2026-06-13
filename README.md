@@ -49,6 +49,8 @@ ros2 launch target_geo_comm target_geo.launch.py \
   - `x=north, y=east, z=down`
 - `/target_geo`: `NavSatFix`
   - 估计出的目标经纬度和高度
+- `/target_geo_raw`: `NavSatFix`
+  - 未启用仿真拉远前的原始目标经纬度，用于和 `/target_geo` 对比
 
 ## 外参参数
 
@@ -64,6 +66,27 @@ ros2 launch target_geo_comm target_geo.launch.py \
   - `pnp`: 使用视觉 PnP 的三维位置估计目标高度
   - `ground_msl_offset`: 目标高度固定为 `target_altitude_offset_m`
   - `aircraft_msl_plus_offset`: 目标高度固定为飞机当前 MSL 高度加偏移
+
+## 目标经纬度仿真
+
+默认不启用。模拟阶段如果靶标就在摄像头前方，导致 `/target_geo` 几乎在飞机正下方，可以启用目标拉远：
+
+```bash
+ros2 launch target_geo_comm target_geo.launch.py \
+  use_sim_target_geo:=true \
+  sim_target_distance_m:=200.0 \
+  sim_target_bearing_offset_deg:=15.0
+```
+
+- `use_sim_target_geo`: 是否发布拉远后的 `/target_geo`，默认 `false`
+- `sim_target_distance_m`: 拉远后的水平距离，单位米，默认 `80.0`
+- `sim_min_direction_distance_m`: 原始目标水平距离小于该值时，使用飞机航向作为拉远方向，默认 `3.0`
+- `sim_target_bearing_offset_deg`: 在选定方向上额外旋转的方位角，正值向右偏，负值向左偏，默认 `0.0`
+- `publish_raw_target_geo`: 是否发布 `/target_geo_raw`，默认 `true`
+
+如果只增大 `sim_target_distance_m`，目标仍会沿原方向拉远；原方向左右分量很小时，左右偏移也会很小。需要明显左右偏移时设置 `sim_target_bearing_offset_deg`，例如 200 米距离配 15 度偏角，横向偏移约 52 米。
+
+启用后，`/target_geo_raw` 保留真实视觉换算结果，`/target_geo` 输出拉远后的模拟航点，下游航点发送节点无需修改。
 
 机体系约定：
 
