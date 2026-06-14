@@ -16,7 +16,7 @@ def generate_launch_description():
             DeclareLaunchArgument("exit_wp_seq", default_value="5"),
             DeclareLaunchArgument("retry_wp_seq", default_value="2"),
             DeclareLaunchArgument("fallback_release_wp_seq", default_value="3"),
-            DeclareLaunchArgument("max_visual_attempts", default_value="2"),
+            DeclareLaunchArgument("max_visual_attempts", default_value="3"),
             DeclareLaunchArgument("target_confirm_count", default_value="5"),
             DeclareLaunchArgument("target_confirm_radius_m", default_value="20.0"),
             DeclareLaunchArgument("min_update_interval_s", default_value="2.0"),

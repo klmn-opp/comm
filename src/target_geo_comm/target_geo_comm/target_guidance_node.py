@@ -151,6 +151,7 @@ class TargetGuidanceNode(Node):
         self.last_update_wall_time = 0.0
         self.visual_attempts = 0
         self.retry_commanded_for_seq = -1
+        self.retry_entry_seen = True
         self.fallback_release_sent = False
         self.bomb_released = False
         self.last_status = ""
@@ -268,6 +269,8 @@ class TargetGuidanceNode(Node):
         if self.require_auto and status.mode != "AUTO":
             self.publish_status(active, f"waiting AUTO current={status.mode}")
             return
+
+        self.update_retry_entry_seen(status)
 
         if self.locked_target is not None and self.target_locked_by_distance(status):
             self.target_frozen = True
@@ -453,6 +456,7 @@ class TargetGuidanceNode(Node):
         if (
             self.locked_target is None
             and self.visual_attempts >= self.max_visual_attempts - 1
+            and self.retry_entry_seen
             and status.mission_seq > self.fallback_release_wp_seq
             and not self.fallback_release_sent
         ):
@@ -471,6 +475,7 @@ class TargetGuidanceNode(Node):
             return
         self.visual_attempts += 1
         self.retry_commanded_for_seq = status.mission_seq
+        self.retry_entry_seen = False
         self.candidate_target = None
         self.confirm_count = 0
         self.locked_target = None
@@ -481,6 +486,14 @@ class TargetGuidanceNode(Node):
         self.get_logger().warning(
             f"{reason}; retry attempt={self.visual_attempts}/{self.max_visual_attempts} wp={self.retry_wp_seq}"
         )
+
+    def update_retry_entry_seen(self, status: VehicleStatus) -> None:
+        if self.retry_entry_seen or self.visual_attempts <= 0:
+            return
+        if status.mission_seq <= self.retry_wp_seq:
+            self.retry_entry_seen = True
+            self.retry_commanded_for_seq = -1
+            self.get_logger().info(f"retry entry wp{self.retry_wp_seq} reached; fallback is now armed")
 
     def send_force_release(self) -> None:
         msg = Bool()
