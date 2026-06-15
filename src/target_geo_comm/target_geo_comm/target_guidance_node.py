@@ -95,7 +95,13 @@ class TargetGuidanceNode(Node):
         self.declare_parameter("exit_wp_seq", 5)
         self.declare_parameter("retry_wp_seq", 2)
         self.declare_parameter("fallback_release_wp_seq", 3)
-        self.declare_parameter("max_visual_attempts", 2)
+        self.declare_parameter("max_visual_attempts", 3)
+        self.declare_parameter("fallback_release_lat_deg", 0.0)
+        self.declare_parameter("fallback_release_lon_deg", 0.0)
+        self.declare_parameter("fallback_release_radius_m", 45.0)
+        self.declare_parameter("visual_min_along_m", 40.0)
+        self.declare_parameter("visual_max_along_m", 350.0)
+        self.declare_parameter("visual_max_cross_m", 80.0)
         self.declare_parameter("target_confirm_count", 5)
         self.declare_parameter("target_confirm_radius_m", 20.0)
         self.declare_parameter("min_update_interval_s", 2.0)
@@ -123,6 +129,12 @@ class TargetGuidanceNode(Node):
         self.retry_wp_seq = int(self.get_parameter("retry_wp_seq").value)
         self.fallback_release_wp_seq = int(self.get_parameter("fallback_release_wp_seq").value)
         self.max_visual_attempts = max(1, int(self.get_parameter("max_visual_attempts").value))
+        self.fallback_release_lat_deg = float(self.get_parameter("fallback_release_lat_deg").value)
+        self.fallback_release_lon_deg = float(self.get_parameter("fallback_release_lon_deg").value)
+        self.fallback_release_radius_m = float(self.get_parameter("fallback_release_radius_m").value)
+        self.visual_min_along_m = float(self.get_parameter("visual_min_along_m").value)
+        self.visual_max_along_m = float(self.get_parameter("visual_max_along_m").value)
+        self.visual_max_cross_m = float(self.get_parameter("visual_max_cross_m").value)
         self.target_confirm_count = max(1, int(self.get_parameter("target_confirm_count").value))
         self.target_confirm_radius_m = float(self.get_parameter("target_confirm_radius_m").value)
         self.min_update_interval_s = float(self.get_parameter("min_update_interval_s").value)
@@ -152,6 +164,7 @@ class TargetGuidanceNode(Node):
         self.visual_attempts = 0
         self.retry_commanded_for_seq = -1
         self.retry_entry_seen = True
+        self.visual_entry_commanded_attempt = -1
         self.fallback_release_sent = False
         self.bomb_released = False
         self.last_status = ""
@@ -271,11 +284,12 @@ class TargetGuidanceNode(Node):
             return
 
         self.update_retry_entry_seen(status)
+        self.maybe_skip_fallback_wp_for_visual_attempt(status)
 
         if self.locked_target is not None and self.target_locked_by_distance(status):
             self.target_frozen = True
 
-        self.update_target_confirmation()
+        self.update_target_confirmation(status)
         self.publish_locked_target()
 
         if self.locked_target is not None and not self.target_locked_by_distance(status):
@@ -307,8 +321,12 @@ class TargetGuidanceNode(Node):
             and status.mission_seq >= 0
         )
 
-    def update_target_confirmation(self) -> None:
+    def update_target_confirmation(self, status: VehicleStatus) -> None:
         if self.target_frozen:
+            return
+        if not self.visual_window_active(status):
+            self.candidate_target = None
+            self.confirm_count = 0
             return
         target = self.latest_target
         if target is None:
@@ -324,6 +342,10 @@ class TargetGuidanceNode(Node):
             alt_m=float(target.altitude) if math.isfinite(target.altitude) else self.mission_altitude_m,
             stamp_ns=self.get_clock().now().nanoseconds,
         )
+        if not self.target_in_visual_corridor(status, incoming):
+            self.candidate_target = None
+            self.confirm_count = 0
+            return
 
         if self.candidate_target is None:
             self.candidate_target = incoming
@@ -457,7 +479,7 @@ class TargetGuidanceNode(Node):
             self.locked_target is None
             and self.visual_attempts >= self.max_visual_attempts - 1
             and self.retry_entry_seen
-            and status.mission_seq > self.fallback_release_wp_seq
+            and self.at_fallback_release_point(status)
             and not self.fallback_release_sent
         ):
             self.send_force_release()
@@ -471,11 +493,14 @@ class TargetGuidanceNode(Node):
             self.command_retry_once(status, "passed target wp without visual lock")
 
     def command_retry_once(self, status: VehicleStatus, reason: str) -> None:
+        if not self.retry_entry_seen:
+            return
         if self.retry_commanded_for_seq == status.mission_seq:
             return
         self.visual_attempts += 1
         self.retry_commanded_for_seq = status.mission_seq
         self.retry_entry_seen = False
+        self.visual_entry_commanded_attempt = -1
         self.candidate_target = None
         self.confirm_count = 0
         self.locked_target = None
@@ -493,7 +518,55 @@ class TargetGuidanceNode(Node):
         if status.mission_seq <= self.retry_wp_seq:
             self.retry_entry_seen = True
             self.retry_commanded_for_seq = -1
-            self.get_logger().info(f"retry entry wp{self.retry_wp_seq} reached; fallback is now armed")
+            self.get_logger().info(f"retry entry wp{self.retry_wp_seq} reached")
+
+    def maybe_skip_fallback_wp_for_visual_attempt(self, status: VehicleStatus) -> None:
+        if self.bomb_released or self.locked_target is not None:
+            return
+        if not self.retry_entry_seen:
+            return
+        if self.visual_attempts >= self.max_visual_attempts - 1:
+            return
+        if self.visual_entry_commanded_attempt == self.visual_attempts:
+            return
+        if status.mission_seq == self.fallback_release_wp_seq:
+            self.set_mission_current(self.target_wp_seq)
+            self.visual_entry_commanded_attempt = self.visual_attempts
+            self.get_logger().info(
+                f"visual attempt {self.visual_attempts + 1}/{self.max_visual_attempts}: "
+                f"skip wp{self.fallback_release_wp_seq}, go to wp{self.target_wp_seq}"
+            )
+
+    def visual_window_active(self, status: VehicleStatus) -> bool:
+        if self.bomb_released:
+            return False
+        if self.visual_attempts >= self.max_visual_attempts - 1:
+            return False
+        return self.retry_wp_seq <= status.mission_seq <= self.target_wp_seq
+
+    def target_in_visual_corridor(self, status: VehicleStatus, target: LockedTarget) -> bool:
+        heading = math.radians(self.resolve_attack_heading(status))
+        north_m, east_m = geodetic_to_local_ned(status.lat_deg, status.lon_deg, target.lat_deg, target.lon_deg)
+        along_m = north_m * math.cos(heading) + east_m * math.sin(heading)
+        cross_m = -north_m * math.sin(heading) + east_m * math.cos(heading)
+        if along_m < self.visual_min_along_m or along_m > self.visual_max_along_m:
+            return False
+        return abs(cross_m) <= self.visual_max_cross_m
+
+    def at_fallback_release_point(self, status: VehicleStatus) -> bool:
+        if status.mission_seq > self.fallback_release_wp_seq:
+            return True
+        if status.mission_seq != self.fallback_release_wp_seq:
+            return False
+        if not self.valid_lat_lon(self.fallback_release_lat_deg, self.fallback_release_lon_deg):
+            return False
+        north_m, east_m = geodetic_to_local_ned(
+            self.fallback_release_lat_deg,
+            self.fallback_release_lon_deg,
+            status.lat_deg,
+            status.lon_deg,
+        )
+        return math.hypot(north_m, east_m) <= self.fallback_release_radius_m
 
     def send_force_release(self) -> None:
         msg = Bool()
@@ -584,6 +657,16 @@ class TargetGuidanceNode(Node):
             and math.isfinite(msg.longitude)
             and -90.0 <= msg.latitude <= 90.0
             and -180.0 <= msg.longitude <= 180.0
+        )
+
+    @staticmethod
+    def valid_lat_lon(lat_deg: float, lon_deg: float) -> bool:
+        return (
+            math.isfinite(lat_deg)
+            and math.isfinite(lon_deg)
+            and -90.0 <= lat_deg <= 90.0
+            and -180.0 <= lon_deg <= 180.0
+            and not (abs(lat_deg) < 1e-9 and abs(lon_deg) < 1e-9)
         )
 
     @staticmethod
